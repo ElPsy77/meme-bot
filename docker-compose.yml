@@ -7,4 +7,5 @@ services:
       - "${WEB_PORT:-8000}:8000"
     volumes:
       - ./data:/app/data
+      - ${MEDIA_HOST_FOLDER:-./memes}:/app/memes
     restart: unless-stopped

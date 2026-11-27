@@ -2,12 +2,13 @@ import logging
 import hashlib, hmac
 from pathlib import Path
 from fastapi import FastAPI, Request, Form, Depends, HTTPException
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, FileResponse
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import select, desc, func
+from urllib.parse import quote, urlparse
 from app.config import settings
 from app.db import Session, Meme, Target
 from app.core import MemeService
@@ -72,8 +73,31 @@ async def dashboard(request: Request, q: str="", status: str="", page: int=1):
         total = await s.scalar(select(func.count()).select_from(Meme).where(*filters)) or 0
         memes = list((await s.scalars(select(Meme).where(*filters).order_by(desc(Meme.added_at)).limit(100).offset((page - 1) * 100))).all())
         targets = list((await s.scalars(select(Target).order_by(Target.platform))).all())
+    roots = {"source": Path(settings.media_folder).expanduser().resolve(), "archive": Path(settings.media_archive_folder).expanduser().resolve()}
+    for meme in memes:
+        media = meme.media_url
+        if urlparse(media).scheme in {"http", "https"}:
+            meme.preview_url = media
+        else:
+            meme.preview_url = ""
+            try:
+                resolved = Path(media).resolve()
+                for kind, root in roots.items():
+                    if resolved.is_relative_to(root):
+                        meme.preview_url = f"/media/{kind}/{quote(resolved.relative_to(root).as_posix(), safe='/')}"
+                        break
+            except OSError: pass
     stats = await service.stats()
     return templates.TemplateResponse(request=request, name="index.html", context={"memes":memes,"targets":targets,"stats":stats,"q":q,"status":status,"page":page,"has_prev":page>1,"has_next":page*100<total,"total_filtered":total,"logs":_logs(),"post_interval":await service.get_setting("post_interval_minutes",str(settings.post_interval_minutes)),"poll_interval":await service.get_setting("poll_interval_minutes",str(settings.poll_interval_minutes)),"new_pin_mode":await service.get_setting("new_pin_mode",settings.new_pin_mode)})
+
+@app.get("/media/{kind}/{relative_path:path}", dependencies=[Depends(auth)])
+async def local_media(kind: str, relative_path: str):
+    if kind not in {"source", "archive"}: raise HTTPException(404, "Media not found")
+    root = Path(settings.media_folder if kind == "source" else settings.media_archive_folder).expanduser().resolve()
+    target = (root / relative_path).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        raise HTTPException(404, "Media not found")
+    return FileResponse(target)
 
 async def _pin_for_id(meme_id):
     async with Session() as s:

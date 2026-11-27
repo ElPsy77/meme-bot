@@ -1,15 +1,20 @@
 import asyncio, logging, random
+import hashlib
+from pathlib import Path
 from datetime import datetime, timezone
 from sqlalchemy import select, func, update, delete
 from app.config import settings
 from app.db import Session, Meme, Target, Setting, Delivery
-from app.sources import PinterestSource
+from app.sources import build_source
 from app.platforms import telegram, discord
 
 log = logging.getLogger(__name__)
 
 class MemeService:
-    def __init__(self): self.source = PinterestSource(); self._post_lock = asyncio.Lock()
+    def __init__(self):
+        self.source = build_source()
+        self._post_lock = asyncio.Lock()
+        self._ingest_lock = asyncio.Lock()
 
     async def get_setting(self, key, default=""):
         async with Session() as s:
@@ -35,6 +40,34 @@ class MemeService:
         async with Session() as s:
             await s.execute(update(Meme).where(Meme.status == "sending").values(status="queued"))
             await s.commit()
+
+    async def ingest_upload(self, temporary_path: Path, suffix: str, media_type: str, title: str) -> tuple[str, bool, bool]:
+        temporary_path = Path(temporary_path).resolve()
+        suffix = suffix.lower()
+        allowed = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif", ".gif", ".mp4", ".mov", ".m4v", ".webm"}
+        if suffix not in allowed:
+            raise ValueError("Unsupported uploaded media type")
+        digest = await asyncio.to_thread(_sha256_file, temporary_path)
+        pin_id = f"upload-{digest}"
+        root = Path(settings.media_archive_folder).expanduser().resolve()
+        inbox = root / ".inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        permanent_path = inbox / f"{digest}{suffix}"
+        async with self._ingest_lock:
+            async with Session() as s:
+                existing = await s.scalar(select(Meme).where(Meme.pin_id == pin_id))
+                if existing:
+                    temporary_path.unlink(missing_ok=True)
+                    return pin_id, False, existing.status == "sent"
+                if temporary_path != permanent_path:
+                    if permanent_path.exists(): temporary_path.unlink(missing_ok=True)
+                    else: temporary_path.replace(permanent_path)
+                s.add(Meme(pin_id=pin_id, pin_url="", media_url=str(permanent_path), media_type=media_type, title=title.strip() or "Загрузка из Telegram", status="queued", is_new=True))
+                await s.commit()
+        paused = (await self.get_setting("paused", "false")).lower() == "true"
+        should_send = not paused and (await self.get_setting("new_pin_mode", settings.new_pin_mode)) == "immediate"
+        sent = await self.post_by_pin(pin_id) if should_send else False
+        return pin_id, True, sent
 
     async def check_source(self):
         pins = await self.source.fetch()
@@ -135,3 +168,10 @@ class MemeService:
             sent = await s.scalar(select(func.count()).select_from(Meme).where(Meme.status == "sent")) or 0
             queued = await s.scalar(select(func.count()).select_from(Meme).where(Meme.status == "queued")) or 0
         return {"total":total,"sent":sent,"queued":queued,"paused":(await self.get_setting("paused","false")) == "true"}
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

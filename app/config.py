@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -8,7 +8,9 @@ class Settings(BaseSettings):
     telegram_targets: str = ""
     discord_bot_token: str = ""
     discord_targets: str = ""
-    pinterest_source: str = "api"
+    meme_source: str = Field(default="telegram_inbox", validation_alias=AliasChoices("MEME_SOURCE", "PINTEREST_SOURCE"))
+    media_folder: str = "./memes"
+    media_archive_folder: str = "./data/media"
     pinterest_board_url: str = ""
     pinterest_board_id: str = ""
     pinterest_access_token: str = ""
@@ -24,14 +26,16 @@ class Settings(BaseSettings):
     web_host: str = "0.0.0.0"
     web_port: int = 8000
     max_media_mb: int = Field(default=48, ge=1, le=500)
+    inbox_max_mb: int = Field(default=18, ge=1, le=20)
     log_level: str = "INFO"
 
-    @field_validator("pinterest_source")
+    @field_validator("meme_source")
     @classmethod
-    def validate_pinterest_source(cls, value: str) -> str:
+    def validate_meme_source(cls, value: str) -> str:
         value = value.lower().strip()
-        if value not in {"api", "rss"}:
-            raise ValueError("PINTEREST_SOURCE must be 'api' or 'rss'")
+        value = {"api": "pinterest_api", "rss": "pinterest_rss"}.get(value, value)
+        if value not in {"pinterest_api", "pinterest_rss", "folder", "telegram_inbox"}:
+            raise ValueError("MEME_SOURCE must be 'pinterest_api', 'pinterest_rss', 'folder', or 'telegram_inbox'")
         return value
 
     @field_validator("new_pin_mode")

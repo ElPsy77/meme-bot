@@ -16,11 +16,14 @@ async def send(target_id: str, media_url: str, media_type: str, caption: str, pi
     channel = client.get_channel(int(target_id))
     if channel is None: channel = await client.fetch_channel(int(target_id))
     if media_type == "link":
-        await channel.send(f"{caption}\n{pin_url}"[:2000]); return
+        await channel.send("\n".join(part.strip() for part in (caption, pin_url) if part and part.strip())[:2000]); return
     try:
         payload, _, filename = await download_media(media_url, settings.max_media_mb * 1024 * 1024)
         file = discord.File(fp=__import__('io').BytesIO(payload), filename=filename)
-        await channel.send(content=f"{caption}\n{pin_url}"[:2000], file=file)
+        await channel.send(content="\n".join(part.strip() for part in (caption, pin_url) if part and part.strip())[:2000] or None, file=file)
     except Exception as exc:
         log.warning("Discord upload failed; sending links: %s", exc)
-        await channel.send(f"{caption}\n{pin_url}\n{media_url}"[:2000])
+        fallback = "\n".join(part.strip() for part in (caption, pin_url) if part and part.strip())
+        if media_url.startswith(("http://", "https://")):
+            fallback = "\n".join(part for part in (fallback, media_url) if part)
+        await channel.send(fallback[:2000] or "Не удалось прикрепить медиафайл.")

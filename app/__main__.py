@@ -10,6 +10,8 @@ from app.platforms import telegram, discord
 from app.admin.web import app as web_app, configure_service
 
 Path("data").mkdir(exist_ok=True)
+Path(settings.media_folder).mkdir(parents=True, exist_ok=True)
+Path(settings.media_archive_folder).mkdir(parents=True, exist_ok=True)
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s", handlers=[logging.StreamHandler(), logging.FileHandler("data/memovoz.log", encoding="utf-8")])
 log = logging.getLogger("memovoz")
 service = MemeService()
@@ -65,6 +67,8 @@ async def run():
         raise RuntimeError("Set a unique SECRET_KEY in .env before starting")
     if not settings.admin_password_hash:
         raise RuntimeError("Set ADMIN_PASSWORD_HASH in .env; see README for password hash generation")
+    if settings.meme_source == "telegram_inbox" and (not settings.telegram_bot_token or not settings.telegram_admin_id):
+        raise RuntimeError("MEME_SOURCE=telegram_inbox requires TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_ID")
     await init_db()
     await service.recover_inflight()
     await service.sync_targets()
