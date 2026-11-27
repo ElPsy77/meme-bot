@@ -20,4 +20,4 @@ The app reads pins from the Owner's own Pinterest board using the official Pinte
 API tokens are stored in a private environment file on the Owner's server and are never published.
 
 ## Contact
-Questions about this policy: your_email@example.com
+Questions about this policy: makjikkarimbaev@gmail.com
