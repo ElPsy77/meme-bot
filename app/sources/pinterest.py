@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import urlparse
 import logging, re
 import feedparser, httpx
 from app.config import settings
@@ -42,13 +41,14 @@ class PinterestSource:
                     images = media.get("images", item.get("images", {}))
                     video = media.get("video") or media.get("videos") or media.get("video_url") or item.get("videos") or item.get("video_url")
                     if video:
-                        variants = video.get("video_list", video.get("videos", video)) if isinstance(video, dict) else {}
-                        source = variants if isinstance(variants, str) else next((v.get("url") for v in variants.values() if isinstance(v, dict) and v.get("url")), "")
+                        source = _find_video_url(video)
                         kind = "video"
                     else:
                         source = next((v.get("url") for v in images.values() if v.get("url")), "")
                         kind = "gif" if source.lower().split("?")[0].endswith(".gif") else "image"
-                    pin_url = item.get("link") or f"https://www.pinterest.com/pin/{item['id']}/"
+                    # Pinterest's API `link` points to the Pin's destination website,
+                    # not the Pinterest Pin itself.
+                    pin_url = f"https://www.pinterest.com/pin/{item['id']}/"
                     if not source:
                         source = next((v.get("url") for v in images.values() if v.get("url")), "") or pin_url
                         kind = "image" if source != pin_url else "link"
@@ -57,6 +57,29 @@ class PinterestSource:
                 url = f"https://api.pinterest.com/v5/boards/{settings.pinterest_board_id}/pins" if bookmark else ""
                 params = {"page_size": 100, "bookmark": bookmark} if bookmark else {}
         return result
+
+def _find_video_url(value) -> str:
+    if isinstance(value, str):
+        return value if value.startswith(("https://", "http://")) else ""
+    if isinstance(value, dict):
+        direct = value.get("url") or value.get("video_url")
+        if isinstance(direct, str) and direct.startswith(("https://", "http://")):
+            return direct
+        for key in ("video_list", "videos", "video", "items"):
+            if key in value:
+                found = _find_video_url(value[key])
+                if found:
+                    return found
+        for nested in value.values():
+            found = _find_video_url(nested)
+            if found:
+                return found
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            found = _find_video_url(nested)
+            if found:
+                return found
+    return ""
 
     async def _rss(self) -> list[Pin]:
         feed_url = settings.pinterest_rss_url

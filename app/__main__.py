@@ -1,18 +1,19 @@
-import asyncio, logging, os
+import asyncio, logging
 from pathlib import Path
-from contextlib import asynccontextmanager
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import settings
 from app.db import init_db
+from app.db.database import engine
 from app.core import MemeService
 from app.platforms import telegram, discord
-from app.admin.web import app as web_app
+from app.admin.web import app as web_app, configure_service
 
 Path("data").mkdir(exist_ok=True)
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s", handlers=[logging.StreamHandler(), logging.FileHandler("data/memovoz.log", encoding="utf-8")])
 log = logging.getLogger("memovoz")
 service = MemeService()
+configure_service(service)
 telegram.bind(service)
 scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -24,6 +25,29 @@ async def guarded_post():
     try:
         if not await service.post_next(): log.info("No meme sent (queue empty, paused, or no targets)")
     except Exception: log.exception("Scheduled post failed; will retry on next interval")
+
+async def telegram_polling_loop():
+    while True:
+        try:
+            await telegram.dp.start_polling(telegram.bot, handle_signals=False)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Telegram polling stopped; retrying in 15 seconds")
+            await asyncio.sleep(15)
+
+async def discord_login_loop():
+    while True:
+        try:
+            await discord.start()
+            log.info("Discord authenticated")
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Discord authentication failed; retrying in 30 seconds")
+            await asyncio.sleep(30)
 
 async def refresh_jobs():
     try:
@@ -48,10 +72,8 @@ async def run():
     await refresh_jobs()
     scheduler.add_job(refresh_jobs,"interval",seconds=30,id="refresh",max_instances=1)
     scheduler.start()
-    polling = asyncio.create_task(telegram.dp.start_polling(telegram.bot)) if telegram.bot else None
-    if settings.discord_bot_token:
-        try: await discord.start()
-        except Exception: log.exception("Discord login failed; Discord deliveries will retry independently")
+    polling = asyncio.create_task(telegram_polling_loop()) if telegram.bot else None
+    discord_login = asyncio.create_task(discord_login_loop()) if settings.discord_bot_token else None
     config = uvicorn.Config(web_app, host=settings.web_host, port=settings.web_port, log_level=settings.log_level.lower())
     server = uvicorn.Server(config)
     try: await server.serve()
@@ -60,8 +82,12 @@ async def run():
         if polling:
             polling.cancel()
             await asyncio.gather(polling, return_exceptions=True)
+        if discord_login:
+            discord_login.cancel()
+            await asyncio.gather(discord_login, return_exceptions=True)
         if telegram.bot: await telegram.bot.session.close()
         if discord.client.is_ready() or settings.discord_bot_token:
             await discord.client.close()
+        await engine.dispose()
 
 if __name__ == "__main__": asyncio.run(run())

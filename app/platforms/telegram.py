@@ -3,6 +3,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 from app.config import settings
+from app.platforms.media import download_media
 
 log = logging.getLogger(__name__)
 bot = Bot(settings.telegram_bot_token) if settings.telegram_bot_token else None
@@ -43,20 +44,22 @@ def _admin(message: Message) -> bool:
 async def send(target_id: str, media_url: str, media_type: str, caption: str, pin_url: str):
     if not bot: raise RuntimeError("Telegram token is not configured")
     if media_type == "link":
-        await bot.send_message(int(target_id), f"{caption}\n{pin_url}"[:4000]); return
-    url = media_url
+        await bot.send_message(_chat_id(target_id), f"{caption}\n{pin_url}"[:4000]); return
     try:
-        async with __import__('httpx').AsyncClient(timeout=30) as client:
-            response = await client.head(url, follow_redirects=True)
-            length = int(response.headers.get("content-length", "0") or 0)
-            ctype = response.headers.get("content-type", "")
-        if length > settings.max_media_mb * 1024 * 1024: raise ValueError("media exceeds configured upload limit")
-        if media_type == "gif" or "gif" in ctype or url.lower().split("?")[0].endswith(".gif"):
-            await bot.send_animation(int(target_id), url, caption=(caption[:900] + "\n" + pin_url)[:1024])
+        payload, ctype, filename = await download_media(media_url, settings.max_media_mb * 1024 * 1024)
+        from aiogram.types import BufferedInputFile
+        upload = BufferedInputFile(payload, filename=filename)
+        chat_id = _chat_id(target_id)
+        text = (caption[:900] + "\n" + pin_url)[:1024]
+        if media_type == "gif" or "gif" in ctype or media_url.lower().split("?")[0].endswith(".gif"):
+            await bot.send_animation(chat_id, upload, caption=text)
         elif media_type == "video" or "video" in ctype:
-            await bot.send_video(int(target_id), url, caption=(caption[:900] + "\n" + pin_url)[:1024])
+            await bot.send_video(chat_id, upload, caption=text)
         else:
-            await bot.send_photo(int(target_id), url, caption=(caption[:900] + "\n" + pin_url)[:1024])
+            await bot.send_photo(chat_id, upload, caption=text)
     except Exception as exc:
         log.warning("Telegram media upload failed; sending link: %s", exc)
-        await bot.send_message(int(target_id), f"{caption}\n{pin_url}\n{media_url}"[:4000])
+        await bot.send_message(_chat_id(target_id), f"{caption}\n{pin_url}\n{media_url}"[:4000])
+
+def _chat_id(value: str):
+    return value if value.startswith("@") else int(value)

@@ -3,18 +3,24 @@ import hashlib, hmac
 from pathlib import Path
 from fastapi import FastAPI, Request, Form, Depends, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from app.config import settings
 from app.db import Session, Meme, Target
 from app.core import MemeService
 
 log = logging.getLogger(__name__)
 service = MemeService()
+
+def configure_service(core: MemeService):
+    global service
+    service = core
+
 app = FastAPI(title="Memovoz Admin")
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, same_site="lax", https_only=False)
+app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, same_site="lax", https_only=settings.cookie_https_only)
 base = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=base / "static"), name="static")
 templates = Jinja2Templates(directory=str(base / "templates"))
@@ -22,8 +28,15 @@ templates = Jinja2Templates(directory=str(base / "templates"))
 async def auth(request: Request):
     if not request.session.get("logged_in"): raise HTTPException(status_code=401, detail="Sign in at /login")
 
+@app.exception_handler(HTTPException)
+async def handle_http_exception(request: Request, exc: HTTPException):
+    if exc.status_code == 401:
+        return RedirectResponse("/login", status_code=303)
+    return await http_exception_handler(request, exc)
+
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request): return templates.TemplateResponse("login.html", {"request":request,"error":""})
+async def login_page(request: Request):
+    return templates.TemplateResponse(request=request, name="login.html", context={"error":""})
 
 @app.post("/login")
 async def login(request: Request, username: str=Form(...), password: str=Form(...)):
@@ -36,9 +49,10 @@ async def login(request: Request, username: str=Form(...), password: str=Form(..
         except (ValueError, TypeError):
             valid = False
     if username == settings.admin_username and valid:
+        request.session.clear()
         request.session["logged_in"] = True
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse("login.html", {"request":request,"error":"Неверный логин или пароль"}, status_code=401)
+    return templates.TemplateResponse(request=request, name="login.html", context={"error":"Неверный логин или пароль"}, status_code=401)
 
 @app.post("/logout")
 async def logout(request: Request):
@@ -49,15 +63,17 @@ def _logs():
     except OSError: return ["Лог-файл появится после первой записи."]
 
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(auth)])
-async def dashboard(request: Request, q: str="", status: str=""):
+async def dashboard(request: Request, q: str="", status: str="", page: int=1):
+    page = max(1, page)
     async with Session() as s:
-        query = select(Meme).order_by(desc(Meme.added_at))
-        if status: query = query.where(Meme.status == status)
-        if q: query = query.where(Meme.title.ilike(f"%{q}%"))
-        memes = list((await s.scalars(query.limit(500))).all())
+        filters = []
+        if status: filters.append(Meme.status == status)
+        if q: filters.append(Meme.title.ilike(f"%{q}%"))
+        total = await s.scalar(select(func.count()).select_from(Meme).where(*filters)) or 0
+        memes = list((await s.scalars(select(Meme).where(*filters).order_by(desc(Meme.added_at)).limit(100).offset((page - 1) * 100))).all())
         targets = list((await s.scalars(select(Target).order_by(Target.platform))).all())
     stats = await service.stats()
-    return templates.TemplateResponse("index.html", {"request":request,"memes":memes,"targets":targets,"stats":stats,"q":q,"status":status,"logs":_logs(),"post_interval":await service.get_setting("post_interval_minutes",str(settings.post_interval_minutes)),"poll_interval":await service.get_setting("poll_interval_minutes",str(settings.poll_interval_minutes)),"new_pin_mode":await service.get_setting("new_pin_mode",settings.new_pin_mode)})
+    return templates.TemplateResponse(request=request, name="index.html", context={"memes":memes,"targets":targets,"stats":stats,"q":q,"status":status,"page":page,"has_prev":page>1,"has_next":page*100<total,"total_filtered":total,"logs":_logs(),"post_interval":await service.get_setting("post_interval_minutes",str(settings.post_interval_minutes)),"poll_interval":await service.get_setting("poll_interval_minutes",str(settings.poll_interval_minutes)),"new_pin_mode":await service.get_setting("new_pin_mode",settings.new_pin_mode)})
 
 async def _pin_for_id(meme_id):
     async with Session() as s:
@@ -78,6 +94,7 @@ async def delete(meme_id:int): await service.delete(meme_id); return RedirectRes
 
 @app.post("/settings", dependencies=[Depends(auth)])
 async def save_settings(post_interval:int=Form(...), poll_interval:int=Form(...), new_pin_mode:str=Form(...), paused: str=""):
+    if new_pin_mode not in {"immediate", "queue"}: raise HTTPException(400, "Invalid new pin mode")
     await service.set_setting("post_interval_minutes", max(1,post_interval)); await service.set_setting("poll_interval_minutes", max(1,poll_interval))
     await service.set_setting("new_pin_mode",new_pin_mode); await service.set_setting("paused",str(paused == "on").lower())
     return RedirectResponse("/",303)
@@ -85,6 +102,8 @@ async def save_settings(post_interval:int=Form(...), poll_interval:int=Form(...)
 @app.post("/targets", dependencies=[Depends(auth)])
 async def add_target(platform:str=Form(...),target_id:str=Form(...),label:str=Form("")):
     if platform not in {"telegram","discord"}: raise HTTPException(400,"Unknown platform")
+    target_id = target_id.strip()
+    if not target_id: raise HTTPException(400, "Target ID is required")
     async with Session() as s:
         exists=await s.scalar(select(Target).where(Target.platform==platform,Target.target_id==target_id))
         if not exists: s.add(Target(platform=platform,target_id=target_id,label=label or target_id)); await s.commit()

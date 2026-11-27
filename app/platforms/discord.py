@@ -1,6 +1,7 @@
 import logging
 import discord
 from app.config import settings
+from app.platforms.media import download_media
 
 log = logging.getLogger(__name__)
 intents = discord.Intents.default()
@@ -17,11 +18,8 @@ async def send(target_id: str, media_url: str, media_type: str, caption: str, pi
     if media_type == "link":
         await channel.send(f"{caption}\n{pin_url}"[:2000]); return
     try:
-        async with __import__('httpx').AsyncClient(timeout=45, follow_redirects=True) as http:
-            response = await http.get(media_url)
-            response.raise_for_status()
-            if len(response.content) > settings.max_media_mb * 1024 * 1024: raise ValueError("media too large")
-        file = discord.File(fp=__import__('io').BytesIO(response.content), filename=media_url.split("?")[0].rsplit("/", 1)[-1] or "meme")
+        payload, _, filename = await download_media(media_url, settings.max_media_mb * 1024 * 1024)
+        file = discord.File(fp=__import__('io').BytesIO(payload), filename=filename)
         await channel.send(content=f"{caption}\n{pin_url}"[:2000], file=file)
     except Exception as exc:
         log.warning("Discord upload failed; sending links: %s", exc)
