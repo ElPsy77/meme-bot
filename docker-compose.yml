@@ -1,0 +1,10 @@
+services:
+  memovoz:
+    build: .
+    container_name: memovoz
+    env_file: .env
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
